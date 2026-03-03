@@ -1278,5 +1278,135 @@ chain.run("colors")
 # >> ['red', 'blue', 'green', 'yellow', 'orange']
 ```
 
+### 6.4 从0构建Agent框架
+
+主流的框架功能十分强大，但本身学习周期长，学习曲线陡峭，因此通过结合教程，从0构建HelloAgent框架，理解整个智能体框架的技术细节。
+
+#### 6.4.1 为什么构建自己的Agent框架
+
+智能体目前是一个高速发展的领域，市面上存在各种智能体框架，每一种智能体框架有着不同的实现方式以及适用场景，但核心思想保持一致。
+
+- 许多框架为了追求通用性，引入了大量抽象层和配置选项。以LangChain为例，其链式调用机制虽然灵活，但对初学者而言**学习曲线陡峭**，往往需要理解大量概念才能完成简单任务。
+- **黑盒式**的实现过程不利于理解内部工作原理，许多框架将核心逻辑封装得过于严密，开发者难以理解Agent的内部工作机制，缺 乏深度定制能力。
+- 依赖关系复杂，包的体积显得臃肿。
+
+接下来，我们从每一个组件开始，深入理解和体会Agent的关于案例，同时进一步培养系统设计能力（包括模块化设计，接口抽象，错误处理等）。
+
+本章参考的HelloAgent框架，是一个轻量级的智能体框架，同时兼具功能完整性以及学习友好性。
+
+```bash
+- 轻量级与学习友好，除了OpenAI的官方SDK和几个必要的基础库外，不引入任何重型依赖，遇到问题可以直接定位到框架本身
+- 采用OpenAI标准接口，确保兼容性
+- “万物皆工具”的抽象思想，在许多其他框架中需要独立学习的Memory（记忆）、RAG（检索增强生成）、RL（强化学习）、MCP（协议）等模块，在HelloAgents中都被统一抽象为一种“工具”。
+```
+
+#### 6.4.2 快速上手
+
+一个简单的demo：
+
+```python
+from hello_agents import SimpleAgent,HelloAgentsLLM
+from dotenv import load_dotenv
+from hello_agents.tools import CalculatorTool
+
+# 加载环境变量
+load_dotenv()
+
+# 创建LLM实例
+llm = HelloAgentsLLM()
+
+# 创建SimleAgent
+agent = SimpleAgent(
+    name="AI Assistant",
+    llm=llm,
+    system_prompt="你是一个专业的AI助手，能够回答用户的问题。",
+)
+
+response = agent.run("你好，请介绍一下自己👋")
+print(response)
+
+calculator = CalculatorTool()
+
+response = agent.run("请计算1+5+9")
+print(response)
+
+# 查看历史对话
+print(f"历史消息数：{len(agent.get_history())}")
+```
+
+#### 6.4.3 HelloAgentLLM扩展
+
+我们对智能体的大脑进行封装和抽象，实现以下目标：
+
+-  多提供商支持：实现对 OpenAI、ModelScope、智谱 AI 等多种主流 LLM 服务商的无缝切换，避免框 架与特定供应商绑定。
+- 本地模型集成：引入 VLLM 和 Ollama 这两种高性能本地部署方案，满足数据隐私和成本控制的需求。
+- 自动检测机制：建立一套自动识别机制，使框架能根据环境信息智能推断所使用的 LLM 服务类型，简 化用户的配置过程。
+
+这里我们自定义一个继承自父类HelloAgentsLLM（教程LLM客户端）来捕获用户接入魔搭平台的需求：
+
+```python
+import os
+from typing import Optional
+from openai import OpenAI
+from hello_agents import HelloAgentsLLM
+
+class MyLLM(HelloAgentsLLM):
+    """一个自定义的LLM客户端，继承自HelloAgentsLLM。"""
+    def __init__(
+        self,
+        model:Optional[str] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        provider: Optional[str] = "auto",
+        **kwargs
+    ):
+        if provider == "modelscope":
+            print("使用ModelScope提供的模型")
+            self.provider = "modelscope"
+
+            # 解析ModelScope凭证
+            self.api_key = api_key or os.getenv("MODELSCOPE_API_KEY")
+            self.base_url = base_url or os.getenv("LLM_BASE_URL")
+
+            if not self.api_key:
+                raise ValueError("密钥不存在，请在环境变量中设置MODELSCOPE_API_KEY❌️")
+
+            self.model = model or os.getenv("LLM_MODEL_ID")
+            self.temperature = kwargs.get("temperature", 0.7)
+            self.max_tokens = kwargs.get("max_tokens", 1024)
+            self.timeout = kwargs.get("timeout", 30)
+
+            # 创建OpenAI客户端实例
+            self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout)
+
+        else:
+            super().__init__(model=model, api_key=api_key, base_url=base_url, provider=provider, **kwargs)
+```
+
+为了保护数据隐私，我们应该支持本地模型调用，常见的如VLLM以及Ollama。它们都遵循了行业标准API，只需要在实例化LLM客户端时将其视为一个provider即可。
+
+```python
+llm_client = HelloAgentsLLM(
+provider="vllm",
+model="Qwen/Qwen1.5-0.5B-Chat", # 需与服务启动时指定的模型一致
+base_url="http://localhost:8000/v1",
+api_key="vllm" # 本地服务通常不需要真实API Key，可填任意非空字符串
+)
+```
+
+自动检测机制，为了尽可能减少用户的配置负担并遵循“约定优于配置”的原则， HelloAgentsLLM内部设计了两个核心辅助方法：_auto_detect_provider以及_resolve_credentials,前者负责根据环境推断服务商，后者负责根据推理结果完成参数配置。
+
+#### 6.4.4 框架接口实现
+
+在上一节实现了智能体LLM客户端，解决了与LLM通信的问题，接下来学习配套接口和组件来处理数据流、管理配置、应对异常，包含三个核心文件：
+
+- message.py：定义同一的消息格式
+- config.py：定义配置管理方案，使框架易于调整和扩展
+- agent.py：定义所有智能体的抽象基类，为后续实现不同类型的智能体提供统一范式
+
+##### 6.4.4.1 Messages类
+
+LLM作为智能体的大脑，通过对话与智能体交互，为了管理这些对话上下文，我们设计一个统一的Message类进行上下文工程。
+
 
 
