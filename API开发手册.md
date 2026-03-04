@@ -1561,7 +1561,129 @@ class Agent(ABC):
 
 ##### 6.4.5.2 ReActAgent
 
-我们保持ReAct的核心逻辑不变，提升其组织性和可维护性对其进行框架化
+我们保持ReAct的核心逻辑不变，提升其组织性和可维护性对其进行框架化。
+
+```python
+def run(self,input_text:str,**kwargs) -> str:
+        """运行ReAct Agent"""
+        self.current_history = []
+        current_step = 0
+
+        print(f"\n🤖{self.name}开始处理问题：{input_text}")
+
+        while current_step < self.max_steps:
+            current_step += 1
+            print(f"\n---第{current_step}步---")
+
+            # 构建提示词
+            tools_desc = self.tool_registry.get_tools_description()
+            history_str = "\n".join(self.current_history)
+
+            prompt = self.prompt_template.format(
+                tools=tools_desc,
+                question=input_text,
+                history=history_str
+            )
+
+            messages = [{"role":"user","content":prompt}]
+            response_text = self.llm.invoke(messages,**kwargs)
+
+            thought,action = self._parse_output(response_text)
+
+            if action and action.startswith("Finish"):
+                final_answer = self._parse_action_input(action)
+                self.add_message(Message(input_text,"user"))
+                self.add_message(Message(final_answer,"assistant"))
+                return final_answer
+            
+            if action:
+                tool_name,tool_input = self._parse_action(action)
+                observation = self.tool_registry.execute_tool(tool_name,tool_input)
+                self.current_history.append(f"Action:{action}")
+                self.current_history.append(f"Observation:{observation}")
+
+        final_answer = "⚠️无法在指定步数内完成任务！"
+        self.add_message(Message(input_text,"user"))
+        self.add_message(Message(final_answer,"assistant"))
+        return final_answer
+```
+
+##### 6.4.5.3 ReflectionAgent
+
+我们在之前的小节中针对代码优化任务以Reflection范式为核心进行了实现，接下来我们优化Prompt使其能够适应通用性任务，并且统一使用框架的接口配置，信息传递等。
+
+```python
+INITIAL_PROMPT_TEMPLATE = """
+你是一位AI助手，请根据以下用户要求进行回答
+要求: {task}
+"""
+
+REFLECT_PROMPT_TEMPLATE = """
+你是一位擅长反思问题的智能助手，你需要根据原始任务及其原始解决方案作出反思，提出更好地解决方案
+# 原始任务:
+{task}
+# 原始解决方案：
+{output}
+你应该结合原始任务所属领域进行思考，从而得到值得反思和优化的方向
+例如：如果原始任务是编码相关任务，你可以从性能优化，算法复杂度等角度审视和反思原始解决方案并提出更好地解决方案
+如果你认为，原始解决方案中没有可优化的地方或足以满足原始任务时，请回答“无需改进”
+请直接给出你的反思内容，不要输出思考过程等其他内容
+"""
+
+REFINE_PROMPT_TEMPLATE = """
+你是一位擅长优化任务的智能助手，你正在根据一位擅长反思问题的智能助手的反思内容对原始任务进行优化
+# 原始任务:
+{task}
+# 你上一轮优化的结果:
+{last_refine}
+反思助手的反馈内容：
+{feedback}
+请根据评审员的反馈以及上一轮优化的结果对原始任务进行优化
+请直接输出优化后方案，不要有其他输出
+"""
+```
+
+以上是我优化后的提示词，在测试的过程中有以下问题：
+
+- 提示词边界过于**宽泛**，比如“原始解决方案中没有可优化的地方或足以满足原始任务时，请回答“无需改进””，由于是处理开放性的通用问题，这样**边界模糊**的提示词很容易导致模型**过度思考**
+- 如果是特定任务或领域的提示词会更有针对性，更好地设计停止条件
+- 记忆模块是该范式的核心，仔细理解其设计思路
+- 工具是如何管理的：继承父类的工具管理类ToolRegistry，包含工具/函数注册/注销，执行工具，获取工具描述以构建提示词等核心功能，具体参阅源代码
+- 记忆是如何管理的：1.短期记忆使用current_history（列表容器）2.长期记忆继承自父类的add_message方法
+
+![image-20260304155008695](images/image-20260304155008695.png)
+
+##### 6.4.5.4 FunctionCallAgent
+
+针对上述提到的通过Prompt约束工具调用的输出格式十分麻烦，在框架的0.2.8版本后映入了FunctionCallAgent，拥有更强的鲁棒性；它基于OpenAI原生函数调用机制的Agent，展 示了如何使用OpenAI的函数调用机制来构建Agent。  它支持以下功能： 
+
+- _build_tool_schemas:通过工具的description构建OpenAI的function calling schema
+-  _extract_message_content:从OpenAI的响应中提取文本
+-  _parse_function_call_arguments:解析模型返回的JSON字符串参数 
+- _convert_parameter_types:转换参数类型
+
+具体功能参见官方repo的源代码
+
+#### 6.4.6 工具系统
+
+在上文我们将架构内部的消息传递，配置管理以及智能体行为分别抽象成了类进行使用，接下来我们将构建标准的工具基类，使工具融入到整个框架中。
+
+- 统一的工具抽象与管理：建立标准化的Tool基类和ToolRegistry注册机制，为工具的开发、注册、发现 和执行提供统一的基础设施。 
+-  实战驱动的工具开发：以数学计算工具为案例，展示如何设计和实现自定义工具，让读者掌握工具开发的完整流程。 
+- 高级整合与优化策略：通过多源搜索工具的设计，展示如何整合多个外部服务，实现智能后端选择、结果合并和容错处理，体现工具系统在复杂场景下的设计思维。
+
+##### 6.4.6.1 工具基类与注册机制
+
+我们希望构建一套可扩展的工具系统，建立起一套标准的基础设施，包括Tool基类，工具注册表ToolRegistry以及工具管理机制，
+
+首先，让我们来封装一个工具基类：
+
+```python
+```
+
+
+
+
 
 
 
