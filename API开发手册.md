@@ -1679,9 +1679,265 @@ REFINE_PROMPT_TEMPLATE = """
 首先，让我们来封装一个工具基类：
 
 ```python
+class Tool(ABC):
+    """工具基类"""
+    def __init__(self,name:str,description:str):
+        self.name = name
+        self.description = description
+
+    @abstractmethod
+    def run(self,parameters:Dict[str,Any]) -> str:
+        """执行工具"""
+        pass
+
+    @abstractmethod
+    def get_parameters(self) -> List[ToolParameter]:
+        """获取工具参数定义"""
+        pass
 ```
 
+这是所有工具的基类，所有子类需要实现run方法以及get_parameters方法。
 
+接下来我们再来实现一个工具注册类，来对所有的工具进行管理：
+
+```python 
+class ToolRegistry:
+    """工具注册表"""
+    def __init__(self):
+        self._tools:dict[str,Tool] = {}
+        self._functions:dict[str,dict[str,Any]] = {}
+
+    def register_tool(self,tool:Tool):
+        """注册Tool对象"""
+        if tool.name in self._tools:
+            print(f"⚠️警告：工具{tool.name}已存在，将被覆盖")
+        self._tools[tool.name] = tool
+        print(f"✅️工具{tool.name}已注册")
+
+    def register_function(self,name:str,description:str,func:Callable[[str],str]):
+        """
+        将函数注册为工具
+        Args:
+            name:工具名称
+            description:工具描述
+            func:工具函数，接收字符串参数，返回字符串
+        """
+        if name in self._functions:
+            print(f"⚠️ 警告:工具 '{name}' 已存在，将被覆盖。")
+        self._functions[name] = {
+            "description": description,
+            "func": func
+        }
+        print(f"✅️工具 '{name}' 已注册。")
+
+    def get_tools_description(self) -> str:
+        """获取可用工具的str描述"""
+        descriptions = []
+
+        for tool in self._tools.values():
+            descriptions.append(f"-{tool.name}:{tool.description}")
+
+        for name,info in self._functions.items():
+            descriptions.append(f"-{name}:{info["description"]}")
+
+        return "\n".join(descriptions) if descriptions else "❌️暂无可用工具"
+```
+
+##### 6.4.6.2 自定义工具
+
+完成基础建设后，我们可以自定义工具，使用Toolregistry进行注册即可：
+
+```python
+import ast
+import operator
+import math
+from hello_agents import ToolRegistry
+
+from my_tool import Tool
+
+def my_calculate(expression:str) -> str:
+    """实现简单数学计算函数"""
+    if not expression.strip():
+        return "计算表达式不能为空"
+
+    # 支持的基本运算
+    operators = {
+        ast.Add:operator.add,
+        ast.Sub:operator.sub,
+        ast.Mult:operator.mul,
+        ast.Div:operator.truediv
+    }
+
+    # 支持的基本函数
+    functions = {
+        "sqrt":math.sqrt,
+        "pi":math.pi
+    }
+
+    try:
+        node = ast.parse(expression,mode="eval")
+        result = _eval_node(node.body,operators,functions)
+        return str(result)
+    except:
+        return "❌️计算失败，请检查表达式"
+
+def _eval_node(node, operators, functions):
+    """简化的表达式求值"""
+    if isinstance(node, ast.Constant):
+        return node.value
+    elif isinstance(node, ast.BinOp):
+        left = _eval_node(node.left, operators, functions)
+        right = _eval_node(node.right, operators, functions)
+        op = operators.get(type(node.op))
+        return op(left, right)
+    elif isinstance(node, ast.Call):
+        func_name = node.func.id
+        if func_name in functions:
+            args = [_eval_node(arg, operators, functions) for arg in node.args]
+            return functions[func_name](*args)
+    elif isinstance(node, ast.Name):
+        if node.id in functions:
+            return functions[node.id]
+
+def create_calculator_registry():
+    """创建包含计算器的工具注册表"""
+    registry = ToolRegistry()
+
+    registry.register_function(
+        name="my_calculator",
+        description="用于简单数学运算的工具，支持加减乘除以及开方运算",
+        func=my_calculate
+    )
+
+    return registry
+```
+
+##### 6.4.6.3 多元搜索工具
+
+我们最开始在.env文件中定义了Tavily以及SerpAPI的密钥，这里我们基于这两种搜索源定义搜索工具：
+
+```python
+"""自定义高级搜索工具🔍"""
+import os
+from typing import Optional,List,Dict,Any
+from unittest import result
+from hello_agents import ToolRegistry
+
+class MyAdvancedSearchTool:
+    """
+    自定义高级搜索工具
+    """
+    def __init__(self):
+        self.name = "my_nb_search"
+        self.description = "NB的智能搜索工具，自动选择最佳结果"
+        self.search_sources = []
+        self._setup_search_sources()
+
+    def _setup_search_sources(self):
+        """设置可用搜索源"""
+        if os.getenv("TAVILY_API_KEY"):
+            try:
+                from tavily import TavilyClient
+                self.tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+                self.search_sources.append("tavily")
+                print("✅️Tavily搜索源已启用")
+            except ImportError:
+                print("❌️为未到Tavily源")
+        if os.getenv("SERPAPI_API_KEY"):
+            try:
+                import serpapi
+                self.search_sources.append("serpapi")
+                print("✅️SerpAPI搜索源已启用")
+            except ImportError:
+                print("❌️未找到SerpAPI源")
+
+        if self.search_sources:
+            print(f"🔧可用搜索源：{','.join(self.search_sources)}")
+        else:
+            print(f"❌️未找到搜索源，请在.env文件中进行配置")
+
+    def search(self,query:str) -> str:
+        """执行智能体搜索"""
+        if not query.strip():
+            return "❌️搜索内容不能为空！"
+
+        if not self.search_sources:
+            return """
+            ❌️没有找到可用搜索源，请前往.env文件进行配置：
+            1. Tavily API: 设置环境变量 TAVILY_API_KEY
+            获取地址: https://tavily.com/
+            2. SerpAPI: 设置环境变量 SERPAPI_API_KEY
+            获取地址: https://serpapi.com/
+            """
+
+        print(f"🔍开始搜索：{query}")
+
+        for source in self.search_sources:
+            try:
+                # if source == "tavily":
+                #     result = self._search_with_tavily(query)
+                #     if result and "未找到" not in result:
+                #         return f"📊Tavily AI搜索结果:\n\n{result}"
+                if source == "serpapi":
+                    result = self._search_with_serpapi(query)
+                    if result and "未找到" not in result:
+                        return f"🌐SerpApi Google搜索结果:\n\n{result}"
+            except Exception as e:
+                print(f"⚠️{source} 搜索失败: {e}")
+                continue
+        return "❌所有搜索源都失败了，请检查网络连接和API密钥配置"
+
+    def _search_with_tavily(self,query:str) -> str:
+        """使用Tavily搜索"""
+        response = self.tavily_client.search(query=query,max_results=3)
+
+        if response.get('answer'):
+            result = f"💡AI直接回答：{response['answer']}\n\n"
+        else:
+            result = ''
+
+        result += "相关结果：\n"
+        for i,item in enumerate(response.get('results',[])[:3],1):
+            result += f"[{i}] {item.get('title','')}\n"
+            result += f"{item.get('content','')[:150]}...\n\n"
+
+        return result
+
+    def _search_with_serpapi(self, query: str) -> str:
+        """使用SerpApi搜索"""
+        import serpapi
+        search = serpapi.search({
+            "q": query,
+            "api_key": os.getenv("SERPAPI_API_KEY"),
+            "num": 3,
+            "gl":"cn"
+        })
+        if search.get("organic_results"):
+            results = search.get("organic_results") # List
+            result = "🔗Google搜索结果:\n"
+            for i, res in enumerate(results[:3], 1):
+                    result += f"[{i}] {res.get('title', '')}\n"
+                    result += f"    {res.get('snippet', '')}\n\n"
+        return result
+
+def create_advanced_search_registry():
+    registry = ToolRegistry()
+
+    search_tool = MyAdvancedSearchTool()
+
+    registry.register_function(
+        name="advanced_search",
+        description="整合Tavily以及SerpAPI的高级搜索工具",
+        func=search_tool.search
+    )
+
+    return registry
+```
+
+遇到的问题：
+
+- 在教程中对于SerpAPI的返回结果直接使用了get_dict()进行解析，实际上返回的是一个类似于字典的对象，应该使用get方法取出带有“organic_results”再进行处理即可
+- 主要问题仍然聚焦于**信息流转以及解析**
 
 
 
