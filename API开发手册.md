@@ -1939,7 +1939,282 @@ def create_advanced_search_registry():
 - 在教程中对于SerpAPI的返回结果直接使用了get_dict()进行解析，实际上返回的是一个类似于字典的对象，应该使用get方法取出带有“organic_results”再进行处理即可
 - 主要问题仍然聚焦于**信息流转以及解析**
 
+##### 6.4.6.4 工具系统的高级特性
 
+在实际应用过程中，智能体往往需要调用多个工具以完成复杂任务，我们设计一个**工具链管理器**来应对该情况。
+
+```python 
+from typing import List,Dict,Any,Optional
+from hello_agents import ToolRegistry
+
+class ToolChain:
+    """工具链调用管理器，支持多工具调用"""
+    def __init__(self,name:str,description:str):
+        self.name = name
+        self.description = description
+        self.steps:List[Dict[str,Any]] = []
+
+    def add_step(self,tool_name:str,input_template:str,output_key:str=None):
+        """
+        添加工具执行步骤
+        Args：
+        tool_name:工具名称
+        input_template:输入的提示词模版
+        output_key:输出结果的健名
+        """
+        self.steps.append({
+            "tool_name":tool_name,
+            "input_template":input_template,
+            "output_key":output_key or f"step_{len(self.steps)}_result"
+        })
+
+    def execute(self,registry:ToolRegistry,initial_input:str,context:Dict[str,Any]=None) -> str:
+        """执行工具链"""
+        context = context or {}
+        context['input'] = initial_input
+
+        print(f"✅️开始执行工具链：{self.name}")
+
+        for i,step in enumerate(self.steps,1):
+            tool_name = step['tool_name']
+            input_template = step["input_template"]
+            output_key = step["output_key"]
+
+            # 替换模版中的变量
+            try:
+                tool_input = input_template.formate(**context)
+            except KeyError as e:
+                return f"❌️工具链调用失败：模版变量{e}未找到！"
+            
+            print(f"步骤{i}:使用{tool_name}处理'{tool_input[:50]}'...")
+
+            result = registry.execute_tool(tool_name,tool_input)
+            context[output_key] = result
+
+            print(f"✅️步骤{i}完成，结果长度：{len(result)}字符")
+
+        # 返回最后一步的结果
+        final_result = context[self.steps[-1]["output_key"]]
+        print(f"🎉工具链'{self.name}'执行完成")
+        return final_result
+
+class ToolChainManager:
+    """工具链管理器"""
+    def __init__(self,registry:ToolRegistry):
+        self.registry = registry
+        self.chains:Dict[str,ToolChain] = {}
+
+        def register_chain(self,chain:ToolChain):
+            """注册工具链"""
+            self.chains[chain.name] = chain
+            print(f"✅️工具链{chain.name}已注册")
+
+        def execute_chain(self,chain_name:str,input_data:str,context:Dict[str,Any]=None) -> str:
+            """执行指定的工具链"""
+            if chain_name not in self.chains:
+                return f"❌️工具链{chain_name}未注册"
+
+            chain = self.chains[chain_name]
+            return chain.execute(self.registry,input_data,context)
+
+        def list_chains(self) -> List[str]:
+            """列出所有工具"""
+            return list(self.chains.keys())
+```
+
+流程图：
+
+```bash
+用户输入
+    ↓
+初始化上下文 context = {'input': 用户输入}
+    ↓
+┌─────────────────────────────────┐
+│  步骤1: 工具A                  │
+│  输入: 模板替换后的内容          │
+│  输出: context['step_0_result']  │
+└─────────────────────────────────┘
+    ↓
+┌─────────────────────────────────┐
+│  步骤2: 工具B                  │
+│  输入: 使用step_0_result        │
+│  输出: context['step_1_result']  │
+└─────────────────────────────────┘
+    ↓
+    ...
+    ↓
+返回最后一步的结果
+```
+
+### 6.5 多Agent智能旅游助手
+
+通过上文的学习，我们了解了HelloAgent架构的基本原理，接下来我们通过一个实战案例将所学的知识进行融会贯通。
+
+#### 6.5.1 实际意义
+
+规划一次传统的旅行计划往往需要耗费很多时间，我们需要先去景点信息网站查询景点信息，接着查询未来几天的天气情况同时规划前往景点的交通路线以及附近的餐饮情况，这要求我们在多个网站来回辗转（**信息分散**）；其次，如果我们上网去搜索别人的攻略，会**缺少个性化**，因为别人的攻略往往是针对大众群体；最后是计划好的攻略**难以调整**，一处景点的调整很可能会影响整个行程。
+
+我们的目标是设计一个智能旅游助手，包括以下功能：
+
+- 智能行程规划，前端界面收集用户输入的表单数据，系统自动生成包含景点，餐饮，酒店的完整行程
+- 行程地图可视化，使用高德API将游玩路线绘制在前端界面
+- 预算计算，根据行程自动计算门票，住宿费，交通费用，餐饮费用
+- 行程编辑，支持行程生成后用户手动更改行程
+- 行程计划导出，支持用户一键导出行程计划
+
+#### 6.5.2 技术架构
+
+项目采用前后端分离架构，但是人不分离哦😮~~~
+
+![image-20260306093410845](images/image-20260306093410845.png)
+
+- 前端采用Vue3+TyprScript，负责用户交互以及功能展示，包括表单采集，结果展示以及行程可视化
+- 后端采用FastAPI，负责路由，数据验证以及相关业务逻辑
+- 智能体采用教程的HelloAgent框架，负责任务分解、工具调用、结果整合
+- 外部服务主要是为智能体提供真实可靠的外部信息，包括地图信息，LLM服务等
+
+信息流转的过程：收集用户填写的表单信息>后端验证数据>调用智能体系统>多智能体协作>MCP调用外部API>整合结果返回前端>前端渲染
+
+项目目录结构：
+
+```bash
+helloagents-trip-planner/
+├── backend/                         # 后端代码
+│   ├── app/
+│   │   ├── agents/                  # 智能体实现
+│   │   ├── api/                     # API路由
+│   │   ├── models/                  # 数据模型
+│   │   ├── services/                # 服务层
+│   │   └── config.py                # 配置文件
+│   └── requirements.txt             # Python依赖
+└── frontend/                        # 前端代码
+    ├── src/
+    │   ├── views/                   # 页面组件
+    │   ├── services/                # API服务
+    │   ├── types/                   # 类型定义
+    │   └── router/                  # 路由配置
+    └── package.json                 # npm依赖
+```
+
+#### 6.5.3 数据模型设计
+
+##### 6.5.3.1 Web应用中的数据流转
+
+项目的目标是构建一个Web应用，我们先了解一下数据是如何在整个过程中流转的。
+
+用户在前端填写表单数据，通过HTTP请求发送给后端，后端接收到数据后，调用智能体进行处理，智能体又调用高德地图的API、Unspash API等外部服务，后端继续处理这些API返回的各种类型的数据然后返回给前端，前端再进行渲染。
+
+整个过程数据流转：前端表单>HTTP请求>后端Python对象>外部API响应>后端Python对象>HTTP响应>前端TypeScript对象>前端页面展示。
+
+数据经过了多层级的流转，要保证整个过程不出错，我们应该同一数据格式，也就是我们需要数据模型。
+
+##### 6.5.3.2 Pydantic模型
+
+由于各个API返回的数据格式可能不同，使用的参数字段也可能不同，在实际应用的过程中我们需要手动进行多次解析，不方便😭
+
+其次，由于Python是弱类型的语言，在定义变量时不需要声明变量的类型，因此如果遇到数据类型的错误，往往不好排查。
+
+维护性较差，如果我们想为某个接口新增一个字段，需要整个代码到处改，很麻烦。
+
+Pydantic应运而生，它是Python的数据验证库，允许我们使用类来定义数据结构，自动处理验证、转换以及序列化，体现**面向对象**的编程思想：
+
+```python
+from pydantic import BaseModel,Field
+
+class Location(BaseModel):
+    longitude:float = Field(...,description="经度")
+    latitude:float = Field(...,description="纬度")
+    
+class Attraction(BaseModel):
+    name:srt
+    location:Location
+    ticket_price:int = 0
+    
+acttraction = Acttraction(
+	name="宽窄巷子",
+    location=Location(longitude=...,latitude=...)
+    ticket_price=...
+)
+
+lng = attraction.location.longitude
+```
+
+好处😋：
+
+- 如果传入错误的数据类型，Pydantic会立即报错
+- 定义了数据类型后，IDE可以提供自动补全功能
+- 当我们需要修改数据结构，只需要修改类定义，所有使用该类的地方会自动更新
+
+##### 6.5.3.3 Pydantic的核心概念
+
+Pydantic的基础是BaseModel类，所有的数据模型都要继承这个类，我们可以在类中指定每个字段的数据类型。
+
+字段定义使用Field函数，可以指定**默认值、描述、验证规则**等，我们也可以使用Optional表示可选字段：
+
+```python
+from pydantic import BaseModel,Field
+from typing import Optional,List
+
+class Attraction(BaseModel):
+    name:str = Field(...,description="...")
+    rating:float = Field(default=0.0,ge=0,le=5)
+    visit_duration:int = Field(default=60,gt=0)
+    description:Optional[str] = None
+```
+
+同时，Pydantic还支持**嵌套**，即在一个数据模型中嵌套另一个数据模型：
+
+```python
+class DayPlan(BaseModel):
+    date:str
+    attractions:List[Attraction]
+    hotel:Optional[Hotel] = None
+```
+
+Pydantic支持自定义验证器，我们可以使用该功能将API返回的数据格式进行验证和转换，例如使用field_validator装饰器将一个字符串转换为数字：
+
+```python
+from pydantic import field_validator
+
+class WeatherIndo(BaseModel):
+    temperature:int
+    
+    @field_validator('temperature',mode='before'):
+        def parase_temperature(cls,v):
+            if isinstance(v,str):
+                v = v.replace('℃','').strip()
+                return int(v)
+            return v
+```
+
+数据格式的校验以及转换将发生在创建对象时，不需要在代码中手动修改了。
+
+##### 6.5.3.4 自底向上的设计思想
+
+我们使用自底向上的原则设计数据模型，先定义基础模型，再逐步组合出复杂结构，就像我们学习一样，总是从基础简单的部分入手，逐步深入😊
+
+首先，我们来设计位置信息，定义一个Location类来表示经纬度坐标：
+
+```python
+class Location(BaseModel):
+    longitude:float = Field(...,description="经度",ge=-180,le=180)
+    latitude:float = Field(...,description="纬度",ge=-90,le=90)
+```
+
+接下来是景点信息，一个景点应该包括名称，地址，位置，游览时间，描述，评分，图片，门票价格等信息：
+
+```python
+class Acttraction(BaseModel):
+    name:str = Field(...,description="景点名称")
+    address:str = Field(...,description="地址")
+    location:Location = Field(...,description="经纬度坐标")
+    visit_duration:int = Field(...,description="建议游览时间",gt=0)
+    description:str = Field(...,description="景点信息描述")
+    category:Optional[str] = Field(default="景点",description="景点类别")
+    rating:Optional[float] = Field(default=None,ge=0,le=5,description="景点评分")
+    image_url:Optional[str] = Field(default=None,description="图片处理URL")
+    ticket_price:int = Field(default=0,ge=0,description="门票价格（元）")
+```
 
 
 
