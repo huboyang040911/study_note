@@ -2048,7 +2048,7 @@ class ToolChainManager:
 
 ### 6.5 多Agent智能旅游助手
 
-通过上文的学习，我们了解了HelloAgent架构的基本原理，接下来我们通过一个实战案例将所学的知识进行融会贯通。
+通过上文的学习，我们了解了HelloAgent架构的基本原理，接下来我们通过一个实战案例将所学的知识进行融会贯通。这里只给出关键代码理清流程，源码可以参阅官方repo😳
 
 #### 6.5.1 实际意义
 
@@ -2171,7 +2171,7 @@ class DayPlan(BaseModel):
     hotel:Optional[Hotel] = None
 ```
 
-Pydantic支持自定义验证器，我们可以使用该功能将API返回的数据格式进行验证和转换，例如使用field_validator装饰器将一个字符串转换为数字：
+Pydantic支持自定义验证器，我们可以使用该功能将API返回的数据格式进行验证和转换，例如使用**field_validator**装饰器将一个字符串转换为数字：
 
 ```python
 from pydantic import field_validator
@@ -2214,6 +2214,385 @@ class Acttraction(BaseModel):
     rating:Optional[float] = Field(default=None,ge=0,le=5,description="景点评分")
     image_url:Optional[str] = Field(default=None,description="图片处理URL")
     ticket_price:int = Field(default=0,ge=0,description="门票价格（元）")
+```
+
+接下来我们定义餐饮信息和酒店信息，包含名称、地址、位置以及费用等信息：
+
+```python
+class Meal(BaseModel):
+    type:str = Field(...,description="餐饮类型：bearkfast/lunch/dinner/snack")
+    name:str = Field(...,description="餐饮名称")
+    address:Optional[str] = Field(default=None,description="地址")
+    location:Optional[Location] = Field(default=None,description="经纬度坐标")
+    description:Optional[str] = Field(default=None,description="描述")
+    estimated_cost:int = Field(default=0,description="预估费用（元）")
+    
+class Hotel(BaseModel):
+    """酒店信息"""
+    name: str = Field(...,description="酒店名称")
+    address: str = Field(default="",description="酒店地址")
+    location: Optional[Location] = Field(default=None,description="酒店位置")
+    price_range: str = Field(default="",description="价格范围")
+    rating: str = Field(default="",description="评分")
+    distance: str = Field(default="",description="距离景点距离")
+    type: str = Field(default="",description="酒店类型")
+    estimated_cost: int = Field(default=0,description="预估费用(元/晚)")
+```
+
+预算信息是一个特殊的模型，不包含位置，包含各个费用的总和：
+
+```python
+class Budget(BaseModel):
+    """预算信息"""
+    total_attractions: int = Field(default=0,description="景点门票总费用")
+    total_hotels: int = Field(default=0,description="酒店总费用")
+    total_meals: int = Field(default=0,description="餐饮总费用")
+    total_transportation: int = Field(default=0,description="交通总费用")
+    total: int = Field(default=0,description="总费用")
+```
+
+我们将这些基础模型进行组合，构建单日行程，一个单日行程包含日期，描述，交通方式，住宿安排，酒店信息，景点信息以及餐饮列表：
+
+```python
+class DayPlan(BaseModel):
+    date:str = Field(...,description="日期")
+    day_index:int = Field(...,description="第几天")
+    description: str = Field(...,description="当日行程描述")
+    transportation:str = Field(...,description="交通方式")
+    accommodation:str = Field(...,description="住宿安排")
+    hotel:Optional[Hotel] = Field(default=None,description="酒店信息")
+    attractions:List[Attraction] = Field(default_factory=list,description="景点列表")
+    meals:List[Meal] = Field(default_factory=list,description="餐饮安排") # 默认表示一个空列表
+```
+
+接着我们处理天气信息，由于从高德API相应的数据格式不规范，我们使用Pydantic模型的自定义验证器处理：
+
+```python
+class WeatherInfo(BaseModel):
+    """天气信息"""
+    date: str = Field(...,description="日期")
+    day_weather: str = Field(...,description="白天天气")
+    night_weather: str = Field(...,description="夜间天气")
+    day_temp: int = Field(...,description="白天温度(摄氏度)")
+    night_temp: int = Field(...,description="夜间温度(摄氏度)")
+    wind_direction: str = Field(...,description="风向")
+    wind_power: str = Field(...,description="风力")
+    
+    @field_validator('day_temp','night_temp',mode='before')
+    def parse_temperature(cls,v):
+        """解析温度字符串："16°C" -> 16"""
+        if isinstance(v,str):
+            v = v.replace('°C','').replace('℃','').replace('°','').strip()
+            try:
+                return int(v)
+            except ValueError:
+				return 0
+           return v
+```
+
+最后，我们定义完整的旅行计划，这是最顶层模型：
+
+```python
+class TripPlan(BaseModel):
+    """旅行计划"""
+    city: str = Field(...,description="目的地城市")
+    start_date: str = Field(...,description="开始日期")
+    end_date: str = Field(...,description="结束日期")
+    days: List[DayPlan] = Field(default_factory=list,description="每日行程")
+    weather_info: List[WeatherInfo] = Field(default_factory=list,description="天气信
+    息")
+    overall_suggestions: str = Field(...,description="总体建议")
+    budget: Optional[Budget] = Field(default=None,description="预算信息")
+```
+
+##### 6.5.3.5 数据模型在Web应用
+
+在FastAPI中，Pydantic模型可以直接用作请求和响应的类型定义，FastAPI自动进行数据验证：
+
+```python
+# 1. 导入核心模块和自定义数据模型
+from fastapi import FastAPI  # 导入FastAPI框架的核心类，用于创建Web应用实例
+from app.models.schemas import TripPlanRequest,TripPlan  # 导入自定义的请求/响应数据模型（Pydantic模型）
+
+# 2. 创建FastAPI应用实例
+app = FastAPI()  # 实例化FastAPI，这是整个Web服务的核心入口
+
+# 3. 定义POST接口
+@app.post("/api/trip/plan",response_model=TripPlan)  # 装饰器：定义POST请求的接口路径，指定响应数据模型
+async def create_trip_plan(request: TripPlanRequest) -> TripPlan:  # 异步接口函数，接收TripPlanRequest类型的请求体，返回TripPlan类型数据
+    """
+    创建旅行计划
+    FastAPI自动：
+    1. 验证请求数据(TripPlanRequest)
+    2. 验证响应数据(TripPlan)
+    3. 生成OpenAPI文档
+    """
+    # 4. 调用异步函数生成旅行计划（需提前实现generate_trip_plan函数）
+    trip_plan = await generate_trip_plan(request)  # 等待异步函数执行完成，获取旅行计划结果
+    # 5. 返回符合TripPlan模型的响应数据
+    return trip_plan
+```
+
+接口接收的是符合 Pydantic 模型定义的 JSON 数据（自动解析为 Pydantic 模型实例），返回的是 Pydantic 模型实例（自动序列化为 JSON 数据）
+
+#### 6.5.4 多智能体协作
+
+旅游助手设计到多个任务，包括天气查询，景点信息查询，酒店信息查询等任务，如果我们使用单个Agent来完成可能遇到以下问题：
+
+- **时间成本**，让单个智能体完成一次任务需要多次调用工具，每一次调用工具之间是**串行操作**，上一轮结束后才会轮到下一轮，总耗时会很长
+- **提示词的复杂度急剧上升**，要想使用一个统一的提示词指挥智能体完成一个多步骤的任务，会导致提示词难以维护
+
+因此，我们可以将复杂任务分解为多个步骤，让多个Agent扮演不同的角色完成各自的任务
+
+##### 6.5.4.1 Agent角色设计
+
+基于任务分解的原则，这里设计了四种Agent：
+
+![image-20260306150438881](images/image-20260306150438881.png)
+
+我们把整个任务分解后，将子任务分配给不同的Agent处理，接下来我们就只需要专注于每一个Agent的任务，并思考相应的输入输出是什么格式以及调用什么工具🤔
+
+我们先来设计第一个AttractionSearchAgent，目标是根据用户喜好搜索景点：
+
+```python
+ATTRACTION_AGENT_PROMPT = """
+你是一个旅游大师，十分擅长搜索景点
+
+你可以调用工具，遵循以下格式：
+[TOOL_CALL:amap_maps_text_search:keywords=景点,city=城市名称]
+
+**示例:**- `[TOOL_CALL:amap_maps_text_search:keywords=景点,city=北京]`- `[TOOL_CALL:amap_maps_text_search:keywords=博物馆,city=上海]`
+
+<strong>注意</strong>
+- 你必须基于工具搜索结果，禁止编造
+- 根据用户偏好{preferences}搜索{city}的景点
+"""
+```
+
+接下来设计WeatherQueryAgent，它的任务只需要查询目标区域的天气信息即可：
+
+```python
+WEATHER_AGENT_PROMPT = '''
+你是一个天气查询助手
+
+你可以调用工具，遵循以下格式：
+[TOOL_CALL:amap_maps_weather:city=城市名称]
+
+请你开始查询{city}的天气信息
+'''
+```
+
+HotelAgent的任务是搜索目标区域的酒店信息，需要指明城市名称以及住宿类型：
+
+```python
+HOTEL_AGENT_PROMPT = """
+你是一个酒店查询助手
+
+你可以调用工具，遵循以下格式：
+[TOOL_CALL:amap_text_search:keywords=酒店,city=城市名称]
+
+请你开始查询{city}的{accommodation}酒店信息
+"""
+```
+
+最后我们整合以上三个Agent的输出结果，让PlannerAgent为我们规划最终行程：
+
+````python
+PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点信息和天气信息,生成详细的旅行计划。
+
+请严格按照以下JSON格式返回旅行计划:
+```json
+{
+  "city": "城市名称",
+  "start_date": "YYYY-MM-DD",
+  "end_date": "YYYY-MM-DD",
+  "days": [
+    {
+      "date": "YYYY-MM-DD",
+      "day_index": 0,
+      "description": "第1天行程概述",
+      "transportation": "交通方式",
+      "accommodation": "住宿类型",
+      "hotel": {
+        "name": "酒店名称",
+        "address": "酒店地址",
+        "location": {"longitude": 116.397128, "latitude": 39.916527},
+        "price_range": "300-500元",
+        "rating": "4.5",
+        "distance": "距离景点2公里",
+        "type": "经济型酒店",
+        "estimated_cost": 400
+      },
+      "attractions": [
+        {
+          "name": "景点名称",
+          "address": "详细地址",
+          "location": {"longitude": 116.397128, "latitude": 39.916527},
+          "visit_duration": 120,
+          "description": "景点详细描述",
+          "category": "景点类别",
+          "ticket_price": 60
+        }
+      ],
+      "meals": [
+        {"type": "breakfast", "name": "早餐推荐", "description": "早餐描述", "estimated_cost": 30},
+        {"type": "lunch", "name": "午餐推荐", "description": "午餐描述", "estimated_cost": 50},
+        {"type": "dinner", "name": "晚餐推荐", "description": "晚餐描述", "estimated_cost": 80}
+      ]
+    }
+  ],
+  "weather_info": [
+    {
+      "date": "YYYY-MM-DD",
+      "day_weather": "晴",
+      "night_weather": "多云",
+      "day_temp": 25,
+      "night_temp": 15,
+      "wind_direction": "南风",
+      "wind_power": "1-3级"
+    }
+  ],
+  "overall_suggestions": "总体建议",
+  "budget": {
+    "total_attractions": 180,
+    "total_hotels": 1200,
+    "total_meals": 480,
+    "total_transportation": 200,
+    "total": 2060
+  }
+}
+```
+
+**重要提示:**
+1. weather_info数组必须包含每一天的天气信息
+2. 温度必须是纯数字(不要带°C等单位)
+3. 每天安排2-3个景点
+4. 考虑景点之间的距离和游览时间
+5. 每天必须包含早中晚三餐
+6. 提供实用的旅行建议
+7. **必须包含预算信息**:
+   - 景点门票价格(ticket_price)
+   - 餐饮预估费用(estimated_cost)
+   - 酒店预估费用(estimated_cost)
+   - 预算汇总(budget)包含各项总费用
+"""
+````
+
+##### 6.5.4.2 协作流程
+
+按照上一节的流程图，我们通过5个步骤完成这个任务：
+
+```python
+class TripPlannerAgent:
+def __init__(self):
+    self.attraction_agent = SimpleAgent(name="景点搜索"prompt=ATTRACTION_PROMPT)
+    self.weather_agent = SimpleAgent(name="天气查询", prompt=WEATHER_PROMPT)
+    self.hotel_agent = SimpleAgent(name="酒店推荐", prompt=HOTEL_PROMPT)
+    self.planner_agent = SimpleAgent(name="行程规划", prompt=PLANNER_PROMPT)
+    def plan_trip(self, request: TripPlanRequest) -> TripPlan:
+    # 步骤1: 景点搜索
+    attraction_response = self.attraction_agent.run(
+    f"请搜索{request.city}的{request.preferences}景点"
+    )
+    # 步骤2: 天气查询
+    weather_response = self.weather_agent.run(
+    f"请查询{request.city}的天气"
+    )
+    # 步骤3: 酒店推荐
+    hotel_response = self.hotel_agent.run(
+    f"请搜索{request.city}的{request.accommodation}酒店"
+    )
+    # 步骤4: 整合生成计划
+    planner_query = self._build_planner_query(
+    request, attraction_response, weather_response, hotel_response
+    )
+    planner_response = self.planner_agent.run(planner_query)
+    # 步骤5: 解析JSON
+    trip_plan = self._parse_trip_plan(planner_response)
+    return trip_plan
+```
+
+#### 6.5.5 MCP工具集成
+
+观察一下官方的源代码：
+
+```python
+# 步骤1: 景点搜索Agent搜索景点
+            print("📍 步骤1: 搜索景点...")
+            attraction_query = self._build_attraction_query(request)
+            attraction_response = self.attraction_agent.run(attraction_query)
+            print(f"景点搜索结果: {attraction_response[:200]}...\n")
+
+            # 步骤2: 天气查询Agent查询天气
+            print("🌤️  步骤2: 查询天气...")
+            weather_query = f"请查询{request.city}的天气信息"
+            weather_response = self.weather_agent.run(weather_query)
+            print(f"天气查询结果: {weather_response[:200]}...\n")
+
+            # 步骤3: 酒店推荐Agent搜索酒店
+            print("🏨 步骤3: 搜索酒店...")
+            hotel_query = f"请搜索{request.city}的{request.accommodation}酒店"
+            hotel_response = self.hotel_agent.run(hotel_query)
+            print(f"酒店搜索结果: {hotel_response[:200]}...\n")
+```
+
+在多个步骤中都调用了run方法，run方法的底层又是多次调用高德地图的API，那么为什么不直接在Agent中调用API？
+
+- 在当前HelloAgent框架中，Agent 通过识别提示词中的工具调用标记(比如 [TOOL_CALL:tool_name:arg1=value1] )来调用工具，如果直接调用，Agent就失去了自主决策的能力
+- 解析响应困难，三方API的响应数据往往结构十分复杂，我们需要手动编写代码进行解析
+
+##### 6.5.5.1 高德地图MCP集成
+
+MCP(Model Context Protocol)是 Anthropic 提出的标准化协议，用于连接 LLM 和外部工具。核心目标是解决大模型与工具交互的**上下文管理和格式统一**问题。
+
+MCP 要求所有外部工具必须先以**标准化格式声明自身能力**（需要提供结构化 Schema而非硬编码到提示词），大模型通过读取这份声明，自动理解工具的「名称、功能、入参、出参、调用约束」，无需人工编写提示词适配。
+
+本项目使用的是amap-mcp-server。
+
+```bash
+用户请求
+   │
+   ▼
+┌─────────────────────────────────────────────────────────────┐
+│  1. Agent将Prompt + 用户请求 发送给 LLM                    │
+│     (Prompt中包含了工具调用的格式规范)                       │
+└─────────────────────────────────────────────────────────────┘
+   │
+   ▼
+┌─────────────────────────────────────────────────────────────┐
+│  2. LLM分析理解，判断需要调用工具                           │
+│     返回格式化的工具调用指令                                │
+│     (项目自定义格式: [TOOL_CALL:amap_maps_text_search:...] )│
+└─────────────────────────────────────────────────────────────┘
+   │
+   ▼
+┌─────────────────────────────────────────────────────────────┐
+│  3. Agent框架解析LLM响应，提取工具名和参数                  │
+│     转换为MCP协议的JSON-RPC格式                             │
+└─────────────────────────────────────────────────────────────┘
+   │
+   ▼
+┌─────────────────────────────────────────────────────────────┐
+│  4. 通过JSON-RPC协议发送到MCP Server执行                    │
+└─────────────────────────────────────────────────────────────┘
+   │
+   ▼
+   结果返回
+```
+
+在HelloAgent框架中，为了遵循MCP要求的标准化Schema，框架通过Prompt+手动代码解析的方式构造了标准的Schema格式传入MCP服务器。
+
+```bash
+使用MCP协议
+    │
+    ▼
+必须符合JSON-RPC 2.0格式 (这是MCP的"交通规则")
+    │
+    ▼
+构造方式灵活选择:
+    ├── 手动写JSON（最底层）
+    ├── 使用SDK/框架（推荐，更便捷）
+    └── 让MCP Server自动处理（最规范）
 ```
 
 
