@@ -2595,5 +2595,208 @@ MCP 要求所有外部工具必须先以**标准化格式声明自身能力**（
     └── 让MCP Server自动处理（最规范）
 ```
 
+### 6.4 记忆与检索
 
+在之前的章节中，我们已经学习到了智能体的基本架构，包括一个智能体系统的大脑（决策部分），工具调用能力（执行模块），要使智能体完全具备自主规划以及决策的能力，我们还需要赋予智能体记忆的能力。
 
+智能体的记忆功能分为两个层面：
+
+- 短期记忆：通过**存储当前任务的上下文信息**，包括对话历史、思考工程🤔、工具调用结果等内容；主要的实现方式包括：
+  - LLM的上下文窗口，将所有历史信息直接放入Prompt中
+  - 缓冲区（Buffer），一些成熟的框架（如LangChain）会使用不同类型的缓冲区来进行历史对话管理
+- 长期记忆：说的即是将有参考价值、可复用的历史信息存入数据库中，在合适的时机进行检索，使用**RAG+向量知识库**是常用的方法，也可以使用**知识图谱**的方式存储一些关系复杂的依赖型知识
+
+#### 6.4.1 为什么需要引入记忆
+
+首先，LLM是一个无状态的交互模式，每一次用户的请求都是一次独立的计算，我们需要手动对用户与模型的上下文信息做拼接赋予模型记忆的能力。
+
+同时，LLM一旦训练完成，每一次回答只会基于自身内部知识（也就是训练时得到的知识）进行回答，不能满足用户对于信息**实时、专业、来源可解释性**的需求😌，同时也不能满足知识更新的要求。
+
+#### 6.4.2 记忆与RAG系统架构设计
+
+在教程的架构中，记忆与RAG被设计为两个独立的工具，memory_tool 负责存储和维护对话过程中的交互信息， rag_tool 则负责从 用户提供的知识库中检索相关信息作为上下文。
+
+![image-20260311143221068](images/image-20260311143221068.png)
+
+#### 6.4.3 记忆系统
+
+根据人类的记忆过程来构建智能体的记忆系统，核心思想是**模仿人类大脑处理不同类型信息的方式**。以下是HelloAgent记忆系统的完整工作流程：
+
+![image-20260311144315999](images/image-20260311144315999.png)
+
+教程中对于长短期记忆划分为了4个更细致的模块，其中还包括了多模态记忆模块：
+
+首先是**工作记忆** (Working Memory)，它扮演着智能体“**短期记忆**”的角色，主要用于存储当前对话的上下文 信息。为确保高速访问和响应，其容量被有意限制（例如，默认50条），并且生命周期与单个会话绑定，会 话结束后便会自动清理。 
+
+其次是**情景记忆** (Episodic Memory)，它负责长期存储具体的**交互事件和智能体的学习经历**。与工作记忆不同，情景记忆包含了丰富的上下文信息，并支持按时间序列或主题进行回顾式检索，是智能体“复盘”和学习过往经验的基础。 
+
+与具体事件相对应的是**语义记忆** (Semantic Memory)，它存储的是更为**抽象的知识、概念和规则**。例如， 通过对话了解到的用户偏好、需要长期遵守的指令或领域知识点，都适合存放在这里。这部分记忆具有高度 的持久性和重要性，是智能体形成“知识体系”和进行关联推理的核心。 
+
+最后，为了与日益丰富的多媒体交互，我们引入了**感知记忆** (Perceptual Memory)。该模块专门处理图像、音频等**多模态信息**，并支持跨模态检索。其生命周期会根据信息的重要性和可用存储空间进行动态管理。
+
+##### 6.4.3.1 MemoryTool
+
+MemoryTool作为记忆系统的统一接口，支持不同分支的操作：
+
+```python
+def execute(self, action: str, **kwargs) -> str:
+    """执行记忆操作
+    支持的操作：
+    - add: 添加记忆（支持4种类型: working/episodic/semantic/perceptual）
+    - search: 搜索记忆- summary: 获取记忆摘要- stats: 获取统计信息
+    - update: 更新记忆
+    - remove: 删除记忆
+    - forget: 遗忘记忆（多种策略）
+    - consolidate: 整合记忆（短期→长期）
+    - clear_all: 清空所有记忆
+    """
+    if action == "add":
+    	return self._add_memory(**kwargs)
+    elif action == "search":
+    	return self._search_memory(**kwargs)
+    elif action == "summary":
+    	return self._get_summary(**kwargs)
+```
+
+操作一：add
+
+通过回话id自动管理，支持多模态数据的判断，为每个记忆添加时间戳以及会话信息，同时通过importance参数控制当前信息的重要性，为后续检索提供依据。
+
+```python 
+# 1. 工作记忆 - 临时信息，容量有限
+memory_tool.execute("add",
+    content="用户刚才问了关于Python函数的问题",
+    memory_type="working",
+    importance=0.6
+)
+# 2. 情景记忆 - 具体事件和经历
+memory_tool.execute("add",
+    content="2024年3月15日，用户张三完成了第一个Python项目",
+    memory_type="episodic",
+    importance=0.8,
+    event_type="milestone",
+    location="在线学习平台"
+)
+# 3. 语义记忆 - 抽象知识和概念
+memory_tool.execute("add",
+    content="Python是一种解释型、面向对象的编程语言",
+    memory_type="semantic",
+    importance=0.9,
+    knowledge_type="factual"
+)
+# 4. 感知记忆 - 多模态信息
+memory_tool.execute("add",
+    content="用户上传了一张Python代码截图，包含函数定义",
+    memory_type="perceptual",
+    importance=0.7,
+    modality="image",
+    file_path="./uploads/code_screenshot.png"
+)
+```
+
+不同记忆类型（4种）需要传入对应的参数。
+
+操作二：搜索记忆
+
+```python
+# 基础搜索
+result = memory_tool.execute("search", query="Python编程", limit=5)
+# 指定记忆类型搜索
+result = memory_tool.execute("search",
+query="学习进度",
+memory_type="episodic",
+limit=3
+)
+# 多类型搜索
+result = memory_tool.execute("search",
+query="函数定义",
+memory_types=["semantic", "episodic"],
+min_importance=0.5
+)
+```
+
+使用时指定自己的query即可开始在记忆中，同时也可以指定memory_type/memory_types以及min_importance更精确地检索。
+
+操作三：遗忘
+
+框架支持基于重要性，时间，容量进行记忆遗忘。
+
+```python
+# 1. 基于重要性的遗忘 - 删除重要性低于阈值的记忆
+memory_tool.execute("forget",
+    strategy="importance_based",
+    threshold=0.2
+)
+# 2. 基于时间的遗忘 - 删除超过指定天数的记忆
+memory_tool.execute("forget",
+    strategy="time_based",
+    max_age_days=30
+)
+# 3. 基于容量的遗忘 - 当记忆数量超限时删除最不重要的
+memory_tool.execute("forget",
+    strategy="capacity_based",
+    threshold=0.3
+)
+```
+
+操作四：记忆整合
+
+consolidate操作目的是将短期记忆转换为长期记忆，将重要性超过一定阈值的工作记忆进行转换。(可以看出importance对于记忆系统而言是一个很重要的参数)
+
+```python
+# 将重要的工作记忆转为情景记忆
+memory_tool.execute("consolidate",
+from_type="working",
+to_type="episodic",
+importance_threshold=0.7
+)
+# 将重要的情景记忆转为语义记忆
+memory_tool.execute("consolidate",
+from_type="episodic",
+to_type="semantic",
+importance_threshold=0.8
+)
+```
+
+##### 6.4.3.2 MemoryManager
+
+上一节介绍了MemoryTool，MemoryManager是什么呢？我也有点晕了😵
+
+这是框架功能高度解耦的一大体现，是典型的 **Facade（外观）模式** ，MemoryTool 作为统一入口，隐藏了内部复杂的记忆系统细节，让用户可以简单直观地使用记忆功能。MemoryTool专注于**用户接口和参数处理**，而 MemoryManager则负责核心的**记忆管理逻辑**。
+
+```python
+Agent 用户
+    │
+    │ 1. 调用 add/search/其他操作
+    ▼
+MemoryTool (工具层)
+    │   - 参数验证
+    │   - 元数据预处理
+    │   - 结果格式化
+    ▼
+MemoryManager (核心层)
+    │   - 记忆生命周期管理
+    │   - 跨类型协调
+    │   - 重要性计算
+    ▼
+具体记忆类型 (WorkingMemory/EpisodicMemory/SemanticMemory/PerceptualMemory)
+    │   - 存储/检索实现
+    │   - 容量管理
+    │   - 遗忘策略
+    ▼
+MemoryItem (数据模型)
+```
+
+MemoryTool在初始化时会创建一个MemoryManager实例，并根据配置启用不同类型的记忆模块。这种设计让用户可以根据具体需求选择启用哪些记忆类型。
+
+##### 6.4.3.3 四种记忆类型
+
+框架将之前提到的四种记忆类型进行了封装。
+
+1.工作记忆：采用纯内存的存储方式，配合**TTL（Time To Live）机制**，追求的是快速访问以及定期清理。采用的是**混合检索策略**：先尝试TF-IDF向量检索，失败则回退至关键词检索。
+
+2.情景记忆：设计目标是保持事件完整以及时间序列关系，采用**SQLite+Qdrant**混合存储方案，前者负责结构化数据存储，后者负责高效向量检索。
+
+3.语义记忆：负责存储抽象概念，规则等，采用**neo4j+Qdrant**混合存储。语义记忆的评分公式为（框架自定义的评分算法）：(向量相似度 × 0.7 + 图相似度 × 0.3) × (0.8 + 重要性 × 0.4)。
+
+4.感知机制：负责多模态数据的存储和检索，采用**模态分离**的存储策略，，为不同模态 的数据创建独立的向量集合。感知记忆的评分公式为： (向量相似度 × 0.8 + 时间近因性 × 0.2) × (0.8 + 重要性 × 0.4)。
