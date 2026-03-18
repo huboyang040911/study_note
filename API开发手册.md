@@ -2801,6 +2801,210 @@ MemoryTool在初始化时会创建一个MemoryManager实例，并根据配置启
 
 4.感知机制：负责多模态数据的存储和检索，采用**模态分离**的存储策略，，为不同模态 的数据创建独立的向量集合。感知记忆的评分公式为： (向量相似度 × 0.8 + 时间近因性 × 0.2) × (0.8 + 重要性 × 0.4)。
 
+这里有一个例子体会一下：
+
+```python
+from hello_agents import SimpleAgent, HelloAgentsLLM, ToolRegistry
+from hello_agents.tools import MemoryTool
+# 创建具有记忆能力的Agent
+llm = HelloAgentsLLM()
+agent = SimpleAgent(name="记忆助手", llm=llm)
+# 创建记忆工具
+memory_tool = MemoryTool(user_id="user123")
+tool_registry = ToolRegistry()
+tool_registry.register_tool(memory_tool)
+agent.tool_registry = tool_registry
+# 体验记忆功能
+print("=== 添加多个记忆 ===")
+# 添加第一个记忆
+result1 = memory_tool.execute("add", content="用户张三是一名Python开发者，专注于机器学习和
+数据分析", memory_type="semantic", importance=0.8)
+print(f"记忆1: {result1}")
+# 添加第二个记忆
+result2 = memory_tool.execute("add", content="李四是前端工程师，擅长React和Vue.js开发", 
+memory_type="semantic", importance=0.7)
+print(f"记忆2: {result2}")
+# 添加第三个记忆
+result3 = memory_tool.execute("add", content="王五是产品经理，负责用户体验设计和需求分析", 
+memory_type="semantic", importance=0.6)
+print(f"记忆3: {result3}")
+print("\n=== 搜索特定记忆 ===")
+# 搜索前端相关的记忆
+print("
+🔍
+ 搜索 '前端工程师':")
+result = memory_tool.execute("search", query="前端工程师", limit=3)
+print(result)
+print("\n=== 记忆摘要 ===")
+result = memory_tool.execute("summary")
+print(result)
+```
+
+这里我有疑惑🤔，如果每次调用MemoryTool管理记忆都需要传入memory_type和importance，那么智能体的自主性如何体现呢？
+
+其实框架底层是有自动计算两个参数的逻辑的：
+
+1.在添加记忆初始化时会默认为工作记忆。
+
+```python
+def add_memory(
+    self,
+    content: str,
+    memory_type: str = "working",  # 默认工作记忆
+    importance: Optional[float] = None,  # None表示自动计算
+    metadata: Optional[Dict[str, Any]] = None,
+    auto_classify: bool = True  # 默认启用自动分类！
+) -> str:
+```
+
+2.底层可以根据关键字自动判断记忆类型。
+
+```python
+def _classify_memory_type(self, content: str, metadata: Optional[Dict[str, Any]]) -> str:
+    """根据内容自动判断记忆类型"""
+    
+    # 情景记忆关键词（时间相关、事件相关）
+    episodic_keywords = ["昨天", "今天", "明天", "上次", "记得", "发生", "经历"]
+    
+    # 语义记忆关键词（知识相关）
+    semantic_keywords = ["定义", "概念", "规则", "知识", "原理", "方法"]
+    
+    if any(kw in content for kw in episodic_keywords):
+        return "episodic"      # 情景记忆
+    elif any(kw in content for kw in semantic_keywords):
+        return "semantic"      # 语义记忆
+    else:
+        return "working"       # 默认工作记忆
+```
+
+3.自动计算重要性(基于规则，如长度、关键字等)。
+
+```python
+def _calculate_importance(self, content: str, metadata: Optional[Dict[str, Any]]) -> float:
+    importance = 0.5  # 基础重要性
+    
+    # 内容越长，可能越重要
+    if len(content) > 100:
+        importance += 0.1
+    
+    # 关键词检测
+    important_keywords = ["重要", "关键", "必须", "注意", "警告", "错误"]
+    if any(kw in content for kw in important_keywords):
+        importance += 0.2
+    
+    # 元数据优先级
+    if metadata:
+        if metadata.get("priority") == "high":
+            importance += 0.3
+        elif metadata.get("priority") == "low":
+            importance -= 0.2
+    
+    return max(0.0, min(1.0, importance))  # 限制在0-1之间
+```
+
+![image-20260318095632215](images/image-20260318095632215.png)
+
+虽然框架底层只是基于简单的规则进行分类以及重要性计算，但保证了系统整体的鲁棒性以及智能性，后续可以思考如何优化计算机制。
+
+我在Trea中询问了Kimi-K2.5，给出了一些优化方案：
+
+- 结合框架已有的embedding模块，先定义定义每种记忆类型的原型描述，在对输入以及每种原型描述计算余弦相似度，得分最高的即是输入所属的记忆类型。（以下解释了什么是原型描述）
+
+  ```py
+  self.embedder = get_text_embedder()
+          # 定义每种类型的原型描述
+          self.prototypes = {
+              "working": [
+                  "当前正在进行的任务和对话上下文",
+                  "临时性的即时信息",
+                  "短期需要记住的内容"
+              ],
+              "episodic": [
+                  "过去发生的具体事件和经历",
+                  "特定时间点的交互历史",
+                  "用户的个人经历和故事"
+              ],
+              "semantic": [
+                  "通用知识和概念定义",
+                  "事实性信息和规则",
+                  "用户的长期偏好和属性"
+              ]
+          }
+          # 预计算原型嵌入
+          self.prototype_embeddings = self._compute_prototypes()
+  ```
+
+- 还可以基于LLM对输入进行智能分类与评估，主要工作是设计提示词，但我个人认为引入开放域可能导致输出的结果不稳定，因为对于一条消息的类型以及评分是很主观的，很多时候如果无法在提示词中清晰地定义评分准则，LLM每次输出的结果都是随机的，不可控。
+
+  ```python
+  import json
+  from typing import Dict, Any
+  
+  class LLMBasedMemoryProcessor:
+      """基于LLM的记忆智能处理"""
+      
+      def __init__(self, llm_client):
+          self.llm = llm_client
+      
+      async def analyze_memory(self, content: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+          """
+          使用LLM进行深度分析
+          """
+          prompt = f"""分析以下记忆内容，输出JSON格式：
+  
+  内容：{content}
+  上下文：{context or '无'}
+  
+  请分析：
+  1. memory_type: 记忆类型 (working/episodic/semantic)
+  2. importance: 重要性评分 (0.0-1.0)
+  3. confidence: 分类置信度 (0.0-1.0)
+  4. reasoning: 分析理由
+  5. entities: 提取的实体列表
+  6. relations: 实体关系
+  7. ttl_minutes: 建议的存活时间（分钟）
+  
+  输出格式：
+  {{
+      "memory_type": "semantic",
+      "importance": 0.85,
+      "confidence": 0.92,
+      "reasoning": "这是用户明确陈述的偏好信息...",
+      "entities": ["用户", "Python"],
+      "relations": ["用户-喜欢-Python"],
+      "ttl_minutes": 10080
+  }}"""
+          
+          response = await self.llm.generate(prompt)
+          try:
+              result = json.loads(response)
+              return result
+          except json.JSONDecodeError:
+              # 降级处理
+              return self._fallback_analysis(content)
+      
+      def _fallback_analysis(self, content: str) -> Dict[str, Any]:
+          """降级到规则基础分析"""
+          # 使用原有的关键词方法
+          return {
+              "memory_type": "working",
+              "importance": 0.5,
+              "confidence": 0.3,
+              "reasoning": "LLM解析失败，使用默认规则"
+          }
+  ```
+
+- 基于用户反馈以及自我学习的策略，目前没有看懂😂
+
+曾经有伙伴在issues里提问，认为框架整体的代码量很大，很难重写和复现，询问作者有什么好的建议。
+
+作者回复：
+
+- HelloAgents的开发是不断迭代和完善的过程，你也可以想想现在缺少什么，应该怎么使得它变得更好，也可以直接提交PR到框架源码，这也是学习的初衷
+- 一个好的思路是建立在现在的实现基础，想想怎么让他变得更好，而不是从头开始实现
+
+我的反思🤔：很多时候学习不需要过于关注底层细节的实现，因为我们还是初级开发人员，更多的是聚焦在实际应用场景中如何优化某个功能模块。
+
 #### 6.4.4 RAG
 
 这也是老生常谈的东西了~😄
