@@ -2111,6 +2111,8 @@ class ToolChainManager:
 
 项目采用前后端分离架构，但是人不分离哦😮~~~
 
+现代 Web 应用普遍采用前后端分离的架构。后端只负责提供 API 接口，返回 JSON 格式的数据。前端是一个独立的应用，通过 HTTP 请求调用后端 API，获取数据后渲染页面。
+
 ![image-20260306093410845](images/image-20260306093410845.png)
 
 - 前端采用Vue3+TyprScript，负责用户交互以及功能展示，包括表单采集，结果展示以及行程可视化
@@ -2350,9 +2352,40 @@ class TripPlan(BaseModel):
     budget: Optional[Budget] = Field(default=None,description="预算信息")
 ```
 
+```python 
+class TripRequest(BaseModel):
+    """旅行规划请求"""
+    city: str = Field(..., description="目的地城市", example="北京")
+    start_date: str = Field(..., description="开始日期 YYYY-MM-DD", example="2025-06-01")
+    end_date: str = Field(..., description="结束日期 YYYY-MM-DD", example="2025-06-03")
+    travel_days: int = Field(..., description="旅行天数", ge=1, le=30, example=3)
+    transportation: str = Field(..., description="交通方式", example="公共交通")
+    accommodation: str = Field(..., description="住宿偏好", example="经济型酒店")
+    preferences: List[str] = Field(default=[], description="旅行偏好标签", example=["历史文化", "美食"])
+    free_text_input: Optional[str] = Field(default="", description="额外要求", example="希望多安排一些博物馆")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "city": "北京",
+                "start_date": "2025-06-01",
+                "end_date": "2025-06-03",
+                "travel_days": 3,
+                "transportation": "公共交通",
+                "accommodation": "经济型酒店",
+                "preferences": ["历史文化", "美食"],
+                "free_text_input": "希望多安排一些博物馆"
+            }
+        }
+```
+
+tips:warning:注意前者是响应模型，后者是请求模型（返回给客户端）。
+
+![image-20260323100825889](images/image-20260323100825889.png)
+
 ##### 6.5.3.5 数据模型在Web应用
 
-在FastAPI中，Pydantic模型可以直接用作请求和响应的类型定义，FastAPI自动进行数据验证：
+在FastAPI中，Pydantic模型可以**直接用作请求和响应**的类型定义，FastAPI自动进行数据验证：
 
 ```python
 # 1. 导入核心模块和自定义数据模型
@@ -2639,6 +2672,67 @@ MCP 要求所有外部工具必须先以**标准化格式声明自身能力**（
     ├── 使用SDK/框架（推荐，更便捷）
     └── 让MCP Server自动处理（最规范）
 ```
+
+这里来详细介绍一下项目中智能体根据MCP协议调用工具的全流程：
+
+假设假设用户想搜索北京的景点，AttractionSearchAgent 接收到查询"请搜索北京的历史文化 景点"。Agent 分析这个查询，决定调用 amap_maps_text_search 工具，参数是 keywords=景点，city=北 京。
+
+![image-20260323110227514](images/image-20260323110227514.png)
+
+在这个过程中，[TOOL_CALL:amap_maps_text_search:keywords=景点，city=北京] 是**工具调用的标记**，框架底层负责解析并提取工具名称以及参数，调用对应的Tool。
+
+框架底层将构造一个JSON-RPC格式的消息，通过stdin发送给Server：
+
+```python
+{
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+        "name": "amap_maps_text_search",
+        "arguments": {
+            "keywords": "景点",
+            "city": "北京"
+		}
+	}
+}
+```
+
+MCP服务器收到消息后解析参数，调用高德地图的API，接收响应结果。
+
+高德地图的API返回包含多种参数的json格式数据，MCP服务器解析这些数据，提取关键字段，构造响应格式，通过stdout返回给客户端：
+
+```python
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "找到以下景点：\n1. 故宫博物院 - 地址：东城区景山前街4号\n2. 天坛公园 - 地址：
+东城区天坛路\n..."
+      }
+    ]
+  }
+}
+```
+
+对于智能体而言，它只需要知道调用对应名称的搜索工具，其他细节都封装好了。
+
+##### 6.5.5.2 共享MCP实例
+
+在项目中，我们有三个智能体需要调用外部工具，我们应该为每个智能体都创建一个MCPTool实例吗？🤔
+
+如果为每个智能体分别创建一个实例，意味着需要启动三个服务进程，每个进程独立调用API服务，可能会超过API的并发限制同时会占用更多资源。
+
+因此，在本项目中，我们只启用一个MCPTool实例，所有智能体共享，所有的API调用都通过这个进程实现。我们只需要把MCP工具实例注册到每个智能体的工具列表中即可。
+
+这样一来，即使我们有三个智能体在调用工具，但底层只有一个MCP服务器进程。（由于这里是串行执行的没有问题，但如果智能体是并行的，那么还是会存在资源竞争、API并发限制等问题，这是还是创建多个实例为优）
+
+#### 6.5.6 Unsplash图片API集成
+
+我们希望在前端界面向用户展示对应景点的图片，使用 Unsplash API 来搜索景点图片，由于它是免费的，效果不太好，后期建议使用商用API。
+
+在项目中**直接封装为一个API路由**，因为它不参与智能体的决策。如果需要智能体决定是否需要图片，可以封装成Tool。
 
 ### 6.4 记忆与检索
 
